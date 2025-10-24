@@ -1,0 +1,11 @@
+[package]
+name = "platformed-mf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nom = "7.1"
+icu = { version = "1.4", features = ["experimental"] }
+fixed_decimal = "0.5"
+tinystr = "0.7"
+writeable = "0.5"

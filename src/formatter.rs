@@ -1,10 +1,16 @@
 use crate::types::{
-    Message, MessageElement, ParameterValue, Parameters, PluralExpression, PluralSelector, SelectExpression, NumberFormatType,
+    DateTimeFormatType, DateTimeStyle, Message, MessageElement, NumberFormatType, ParameterValue,
+    Parameters, PluralExpression, PluralSelector, SelectExpression,
 };
-use icu::decimal::FixedDecimalFormatter;
-use icu::decimal::options::FixedDecimalFormatterOptions;
-use icu::experimental::dimension::currency::formatter::{CurrencyFormatter, CurrencyCode};
-use icu::locid::Locale;
+use icu::datetime::DateTimeFormatter;
+use icu::datetime::fieldsets::{T, YMD, YMDE};
+use icu::decimal::DecimalFormatter;
+use icu::decimal::input::Decimal;
+use icu::decimal::options::DecimalFormatterOptions;
+use icu::experimental::dimension::currency::CurrencyCode;
+use icu::experimental::dimension::currency::formatter::CurrencyFormatter;
+use icu::locale::Locale;
+use icu::time::zone::UtcOffset;
 use writeable::Writeable;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,75 +91,146 @@ fn select_case<'a>(select_expr: &'a SelectExpression, value: &str) -> Option<&'a
     None
 }
 
-fn format_number(value: f64, format_type: &NumberFormatType, locale: &Locale) -> Result<String, FormatError> {
-    use fixed_decimal::FixedDecimal;
-
+fn format_number(
+    value: f64,
+    format_type: &NumberFormatType,
+    locale: &Locale,
+) -> Result<String, FormatError> {
     match format_type {
         NumberFormatType::Number => {
-            let formatter = FixedDecimalFormatter::try_new(&locale, FixedDecimalFormatterOptions::default())
-                .map_err(|_| FormatError::InvalidParameterType("number".to_string()))?;
+            let data_locale = locale.into();
+            let formatter =
+                DecimalFormatter::try_new(data_locale, DecimalFormatterOptions::default())
+                    .map_err(|_| FormatError::InvalidParameterType("number".to_string()))?;
 
-            let fixed_decimal = if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
-                FixedDecimal::from(value as i64)
-            } else {
-                let value_str = value.to_string();
-                value_str.parse::<FixedDecimal>()
-                    .map_err(|_| FormatError::InvalidParameterType("number".to_string()))?
-            };
+            let fixed_decimal =
+                if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+                    Decimal::from(value as i64)
+                } else {
+                    let value_str = value.to_string();
+                    value_str
+                        .parse::<Decimal>()
+                        .map_err(|_| FormatError::InvalidParameterType("number".to_string()))?
+                };
 
             Ok(formatter.format(&fixed_decimal).to_string())
         }
         NumberFormatType::Integer => {
-            let formatter = FixedDecimalFormatter::try_new(&locale, FixedDecimalFormatterOptions::default())
-                .map_err(|_| FormatError::InvalidParameterType("number".to_string()))?;
+            let data_locale = locale.into();
+            let formatter =
+                DecimalFormatter::try_new(data_locale, DecimalFormatterOptions::default())
+                    .map_err(|_| FormatError::InvalidParameterType("number".to_string()))?;
 
-            let fixed_decimal = FixedDecimal::from(value as i64);
+            let fixed_decimal = Decimal::from(value as i64);
             Ok(formatter.format(&fixed_decimal).to_string())
         }
         NumberFormatType::Percent => {
             // For now, use simple formatting until we add proper percent formatter
             let percentage = (value * 100.0) as i64;
-            Ok(format!("{}%", percentage))
+            Ok(format!("{percentage}%"))
         }
         NumberFormatType::Currency(currency) => {
-            let currency_formatter = CurrencyFormatter::try_new(&locale, Default::default())
+            let data_locale = locale.into();
+            let currency_formatter = CurrencyFormatter::try_new(data_locale, Default::default())
                 .map_err(|_| FormatError::InvalidParameterType("currency".to_string()))?;
 
-            let fixed_decimal = if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
-                FixedDecimal::from(value as i64)
-            } else {
-                let value_str = value.to_string();
-                value_str.parse::<FixedDecimal>()
-                    .map_err(|_| FormatError::InvalidParameterType("currency".to_string()))?
-            };
+            let fixed_decimal =
+                if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+                    Decimal::from(value as i64)
+                } else {
+                    let value_str = value.to_string();
+                    value_str
+                        .parse::<Decimal>()
+                        .map_err(|_| FormatError::InvalidParameterType("currency".to_string()))?
+                };
 
             // Create currency code dynamically from any valid 3-character currency code
-            let currency_code = if currency.len() == 3 && currency.chars().all(|c| c.is_ascii_alphabetic()) {
-                let currency_upper = currency.to_uppercase();
-                // Parse the currency string into a TinyAsciiStr and wrap in CurrencyCode
-                match currency_upper.parse() {
-                    Ok(tiny_str) => CurrencyCode(tiny_str),
-                    Err(_) => return Err(FormatError::InvalidParameterType(format!("Invalid currency code: {}", currency))),
-                }
-            } else {
-                return Err(FormatError::InvalidParameterType(format!("Currency code must be 3 ASCII letters: {}", currency)));
-            };
+            let currency_code =
+                if currency.len() == 3 && currency.chars().all(|c| c.is_ascii_alphabetic()) {
+                    let currency_upper = currency.to_uppercase();
+                    // Parse the currency string into a TinyAsciiStr and wrap in CurrencyCode
+                    match currency_upper.parse() {
+                        Ok(tiny_str) => CurrencyCode(tiny_str),
+                        Err(_) => {
+                            return Err(FormatError::InvalidParameterType(format!(
+                                "Invalid currency code: {currency}"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(FormatError::InvalidParameterType(format!(
+                        "Currency code must be 3 ASCII letters: {currency}"
+                    )));
+                };
 
             let formatted = currency_formatter.format_fixed_decimal(&fixed_decimal, currency_code);
 
             // Use write_to method to convert FormattedCurrency to String
             let mut result = String::new();
-            formatted.write_to(&mut result)
-                .map_err(|_| FormatError::InvalidParameterType("currency formatting".to_string()))?;
+            formatted.write_to(&mut result).map_err(|_| {
+                FormatError::InvalidParameterType("currency formatting".to_string())
+            })?;
             Ok(result)
         }
     }
 }
 
+fn format_datetime(
+    timestamp: i64,
+    format_type: &DateTimeFormatType,
+    locale: &Locale,
+) -> Result<String, FormatError> {
+    let data_locale = locale.into();
+
+    let datetime = icu::time::ZonedDateTime::from_epoch_milliseconds_and_utc_offset(
+        timestamp,
+        UtcOffset::zero(),
+    );
+
+    Ok(match format_type {
+        DateTimeFormatType::Date(style) => match style {
+            DateTimeStyle::Short => DateTimeFormatter::try_new(data_locale, YMD::short())
+                .map_err(|_| FormatError::InvalidParameterType("date formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+            DateTimeStyle::Medium => DateTimeFormatter::try_new(data_locale, YMD::medium())
+                .map_err(|_| FormatError::InvalidParameterType("date formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+            DateTimeStyle::Long => DateTimeFormatter::try_new(data_locale, YMD::long())
+                .map_err(|_| FormatError::InvalidParameterType("date formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+            DateTimeStyle::Full => DateTimeFormatter::try_new(data_locale, YMDE::long())
+                .map_err(|_| FormatError::InvalidParameterType("date formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+        },
+        DateTimeFormatType::Time(style) => match style {
+            DateTimeStyle::Short => DateTimeFormatter::try_new(data_locale, T::short())
+                .map_err(|_| FormatError::InvalidParameterType("time formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+            DateTimeStyle::Medium => DateTimeFormatter::try_new(data_locale, T::medium())
+                .map_err(|_| FormatError::InvalidParameterType("time formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+            DateTimeStyle::Long => DateTimeFormatter::try_new(data_locale, T::long())
+                .map_err(|_| FormatError::InvalidParameterType("time formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+            DateTimeStyle::Full => DateTimeFormatter::try_new(data_locale, T::long())
+                .map_err(|_| FormatError::InvalidParameterType("time formatting".to_string()))?
+                .format(&datetime)
+                .to_string(),
+        },
+    })
+}
+
 pub fn format_message<'a>(
+    locale: &Locale,
     message: &Message,
     parameters: Parameters<'a>,
-    locale: &Locale,
 ) -> Result<String, FormatError> {
     let mut result = String::new();
 
@@ -164,12 +241,12 @@ pub fn format_message<'a>(
             }
             MessageElement::Parameter(param_name) => match parameters.get(param_name) {
                 Some(ParameterValue::String(value)) => result.push_str(value),
-                Some(ParameterValue::Number(value)) => result.push_str(&value.to_string()),
+                Some(ParameterValue::Integer(value)) => result.push_str(&value.to_string()),
                 None => return Err(FormatError::MissingParameter(param_name.clone())),
             },
             MessageElement::Plural(plural_expr) => {
                 let count = match parameters.get(&plural_expr.parameter) {
-                    Some(ParameterValue::Number(n)) => *n,
+                    Some(ParameterValue::Integer(n)) => *n,
                     Some(ParameterValue::String(s)) => match s.parse::<i64>() {
                         Ok(n) => n,
                         Err(_) => {
@@ -184,7 +261,8 @@ pub fn format_message<'a>(
                 };
 
                 if let Some(selected_message) = select_plural_case(plural_expr, count) {
-                    let formatted_submessage = format_message(selected_message, parameters, locale)?;
+                    let formatted_submessage =
+                        format_message(locale, selected_message, parameters)?;
                     let with_substitutions =
                         substitute_hash_placeholder(&formatted_submessage, count);
                     result.push_str(&with_substitutions);
@@ -193,29 +271,63 @@ pub fn format_message<'a>(
             MessageElement::Select(select_expr) => {
                 let value = match parameters.get(&select_expr.parameter) {
                     Some(ParameterValue::String(s)) => *s,
-                    Some(ParameterValue::Number(_)) => return Err(FormatError::InvalidParameterType(select_expr.parameter.clone())),
-                    None => return Err(FormatError::MissingParameter(select_expr.parameter.clone())),
+                    Some(ParameterValue::Integer(_)) => {
+                        return Err(FormatError::InvalidParameterType(
+                            select_expr.parameter.clone(),
+                        ));
+                    }
+                    None => {
+                        return Err(FormatError::MissingParameter(select_expr.parameter.clone()));
+                    }
                 };
 
                 if let Some(selected_message) = select_case(select_expr, value) {
-                    let formatted_submessage = format_message(selected_message, parameters, locale)?;
+                    let formatted_submessage =
+                        format_message(locale, selected_message, parameters)?;
                     result.push_str(&formatted_submessage);
                 }
             }
             MessageElement::Number(number_expr) => {
                 let number_value = match parameters.get(&number_expr.parameter) {
-                    Some(ParameterValue::Number(n)) => *n as f64,
-                    Some(ParameterValue::String(s)) => {
-                        match s.parse::<f64>() {
-                            Ok(n) => n,
-                            Err(_) => return Err(FormatError::InvalidParameterType(number_expr.parameter.clone())),
+                    Some(ParameterValue::Integer(n)) => *n as f64,
+                    Some(ParameterValue::String(s)) => match s.parse::<f64>() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            return Err(FormatError::InvalidParameterType(
+                                number_expr.parameter.clone(),
+                            ));
                         }
+                    },
+                    None => {
+                        return Err(FormatError::MissingParameter(number_expr.parameter.clone()));
                     }
-                    None => return Err(FormatError::MissingParameter(number_expr.parameter.clone())),
                 };
 
-                let formatted_number = format_number(number_value, &number_expr.format_type, locale)?;
+                let formatted_number =
+                    format_number(number_value, &number_expr.format_type, locale)?;
                 result.push_str(&formatted_number);
+            }
+            MessageElement::DateTime(datetime_expr) => {
+                let timestamp_ms = match parameters.get(&datetime_expr.parameter) {
+                    Some(ParameterValue::Integer(n)) => *n * 1000,
+                    Some(ParameterValue::String(s)) => match s.parse::<i64>() {
+                        Ok(n) => n * 1000,
+                        Err(_) => {
+                            return Err(FormatError::InvalidParameterType(
+                                datetime_expr.parameter.clone(),
+                            ));
+                        }
+                    },
+                    None => {
+                        return Err(FormatError::MissingParameter(
+                            datetime_expr.parameter.clone(),
+                        ));
+                    }
+                };
+
+                let formatted_datetime =
+                    format_datetime(timestamp_ms, &datetime_expr.format_type, locale)?;
+                result.push_str(&formatted_datetime);
             }
         }
     }
@@ -225,16 +337,23 @@ pub fn format_message<'a>(
 
 #[cfg(test)]
 mod tests {
+    use icu::locale::locale;
+
     use super::*;
     use crate::params;
-    use crate::types::{MessageElement, PluralCase, PluralExpression, PluralSelector, SelectCase, SelectExpression, NumberExpression, NumberFormatType};
+    use crate::types::{
+        MessageElement, NumberExpression, NumberFormatType, PluralCase, PluralExpression,
+        PluralSelector, SelectCase, SelectExpression,
+    };
+
+    const EN_LOCALE: &Locale = &locale!("en");
 
     #[test]
     fn test_format_text_only() {
         let message = Message::new(vec![MessageElement::Text("Hello world".to_string())]);
         let params = params!();
 
-        let result = format_message(&message, params);
+        let result = format_message(EN_LOCALE, &message, params);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello world");
     }
@@ -246,7 +365,7 @@ mod tests {
             MessageElement::Parameter("name".to_string()),
         ]);
 
-        let result = format_message(&message, params!("name" => "Alice"));
+        let result = format_message(EN_LOCALE, &message, params!("name" => "Alice"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello Alice");
     }
@@ -260,10 +379,14 @@ mod tests {
             MessageElement::Parameter("lastName".to_string()),
             MessageElement::Text("!".to_string()),
         ]);
-        let result = format_message(&message, params!(
-            "firstName" => "Alice",
-            "lastName" => "Johnson"
-        ));
+        let result = format_message(
+            EN_LOCALE,
+            &message,
+            params!(
+                "firstName" => "Alice",
+                "lastName" => "Johnson"
+            ),
+        );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello Alice Johnson!");
     }
@@ -276,7 +399,7 @@ mod tests {
         ]);
         let params = params!();
 
-        let result = format_message(&message, params);
+        let result = format_message(EN_LOCALE, &message, params);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
@@ -300,7 +423,7 @@ mod tests {
             ],
         };
         let message = Message::new(vec![MessageElement::Plural(plural_expr)]);
-        let result = format_message(&message, params!("count" => 1));
+        let result = format_message(EN_LOCALE, &message, params!("count" => 1));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "1 item");
     }
@@ -321,7 +444,7 @@ mod tests {
             ],
         };
         let message = Message::new(vec![MessageElement::Plural(plural_expr)]);
-        let result = format_message(&message, params!("count" => 5));
+        let result = format_message(EN_LOCALE, &message, params!("count" => 5));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "5 items");
     }
@@ -346,7 +469,7 @@ mod tests {
             MessageElement::Plural(plural_expr),
             MessageElement::Text(" in your cart.".to_string()),
         ]);
-        let result = format_message(&message, params!("count" => 3));
+        let result = format_message(EN_LOCALE, &message, params!("count" => 3));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "You have 3 items in your cart.");
     }
@@ -362,17 +485,21 @@ mod tests {
                 },
                 SelectCase {
                     selector: "female".to_string(),
-                    message: Message::new(vec![MessageElement::Text("She likes this.".to_string())]),
+                    message: Message::new(vec![MessageElement::Text(
+                        "She likes this.".to_string(),
+                    )]),
                 },
                 SelectCase {
                     selector: "other".to_string(),
-                    message: Message::new(vec![MessageElement::Text("They like this.".to_string())]),
+                    message: Message::new(vec![MessageElement::Text(
+                        "They like this.".to_string(),
+                    )]),
                 },
             ],
         };
         let message = Message::new(vec![MessageElement::Select(select_expr)]);
 
-        let result = format_message(&message, params!("gender" => "male"));
+        let result = format_message(EN_LOCALE, &message, params!("gender" => "male"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "He likes this.");
     }
@@ -388,17 +515,21 @@ mod tests {
                 },
                 SelectCase {
                     selector: "female".to_string(),
-                    message: Message::new(vec![MessageElement::Text("She likes this.".to_string())]),
+                    message: Message::new(vec![MessageElement::Text(
+                        "She likes this.".to_string(),
+                    )]),
                 },
                 SelectCase {
                     selector: "other".to_string(),
-                    message: Message::new(vec![MessageElement::Text("They like this.".to_string())]),
+                    message: Message::new(vec![MessageElement::Text(
+                        "They like this.".to_string(),
+                    )]),
                 },
             ],
         };
         let message = Message::new(vec![MessageElement::Select(select_expr)]);
 
-        let result = format_message(&message, params!("gender" => "female"));
+        let result = format_message(EN_LOCALE, &message, params!("gender" => "female"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "She likes this.");
     }
@@ -414,17 +545,21 @@ mod tests {
                 },
                 SelectCase {
                     selector: "female".to_string(),
-                    message: Message::new(vec![MessageElement::Text("She likes this.".to_string())]),
+                    message: Message::new(vec![MessageElement::Text(
+                        "She likes this.".to_string(),
+                    )]),
                 },
                 SelectCase {
                     selector: "other".to_string(),
-                    message: Message::new(vec![MessageElement::Text("They like this.".to_string())]),
+                    message: Message::new(vec![MessageElement::Text(
+                        "They like this.".to_string(),
+                    )]),
                 },
             ],
         };
         let message = Message::new(vec![MessageElement::Select(select_expr)]);
 
-        let result = format_message(&message, params!("gender" => "nonbinary"));
+        let result = format_message(EN_LOCALE, &message, params!("gender" => "nonbinary"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "They like this.");
     }
@@ -437,7 +572,7 @@ mod tests {
         };
         let message = Message::new(vec![MessageElement::Number(number_expr)]);
 
-        let result = format_message(&message, params!("count" => 42));
+        let result = format_message(EN_LOCALE, &message, params!("count" => 42));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "42");
     }
@@ -450,7 +585,7 @@ mod tests {
         };
         let message = Message::new(vec![MessageElement::Number(number_expr)]);
 
-        let result = format_message(&message, params!("price" => "19.99"));
+        let result = format_message(EN_LOCALE, &message, params!("price" => "19.99"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "19.99");
     }
@@ -463,7 +598,7 @@ mod tests {
         };
         let message = Message::new(vec![MessageElement::Number(number_expr)]);
 
-        let result = format_message(&message, params!("count" => "19.99"));
+        let result = format_message(EN_LOCALE, &message, params!("count" => "19.99"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "19");
     }
@@ -476,7 +611,7 @@ mod tests {
         };
         let message = Message::new(vec![MessageElement::Number(number_expr)]);
 
-        let result = format_message(&message, params!("ratio" => "0.75"));
+        let result = format_message(EN_LOCALE, &message, params!("ratio" => "0.75"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "75%");
     }
@@ -489,7 +624,7 @@ mod tests {
         };
         let message = Message::new(vec![MessageElement::Number(number_expr)]);
 
-        let result = format_message(&message, params!("price" => "19.99"));
+        let result = format_message(EN_LOCALE, &message, params!("price" => "19.99"));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "$19.99");
     }
@@ -502,7 +637,7 @@ mod tests {
         };
         let message = Message::new(vec![MessageElement::Number(number_expr)]);
 
-        let result = format_message(&message, params!("price" => 25));
+        let result = format_message(EN_LOCALE, &message, params!("price" => 25));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "€25");
     }
@@ -515,10 +650,9 @@ mod tests {
         };
         let message = Message::new(vec![MessageElement::Number(number_expr)]);
 
-        let result = format_message(&message, params!("price" => 100));
+        let result = format_message(EN_LOCALE, &message, params!("price" => 100));
         assert!(result.is_ok());
-        // ICU4X should handle SEK (Swedish Krona) even though we didn't hardcode it
-        let formatted = result.unwrap();
-        assert!(formatted.contains("100") || formatted.contains("SEK"));
+        // ICU4X formats Swedish Krona with SEK prefix and non-breaking space in English locale
+        assert_eq!(result.unwrap(), "SEK\u{a0}100");
     }
 }

@@ -2,13 +2,13 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{char, multispace0},
-    combinator::map,
+    combinator::{all_consuming, map},
     multi::{many0, many1},
     sequence::{delimited, preceded, tuple},
     IResult,
 };
 
-use crate::types::{Message, MessageElement, PluralExpression, PluralCase, PluralSelector, SelectExpression, SelectCase, NumberExpression, NumberFormatType};
+use crate::types::{Message, MessageElement, PluralExpression, PluralCase, PluralSelector, SelectExpression, SelectCase, NumberExpression, NumberFormatType, DateTimeExpression, DateTimeFormatType, DateTimeStyle};
 
 fn parameter_name(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)
@@ -26,17 +26,29 @@ fn simple_parameter(input: &str) -> IResult<&str, MessageElement> {
 }
 
 fn plural_selector(input: &str) -> IResult<&str, PluralSelector> {
-    map(
-        take_while1(|c: char| c.is_alphanumeric()),
-        |s: &str| PluralSelector::parse(s).unwrap_or(PluralSelector::Other),
-    )(input)
+    alt((
+        // Exact number matching: =0, =1, =42, etc.
+        map(
+            preceded(char('='), take_while1(|c: char| c.is_ascii_digit() || c == '-')),
+            |s: &str| {
+                s.parse::<i64>()
+                    .map(PluralSelector::Exact)
+                    .unwrap_or(PluralSelector::Other)
+            },
+        ),
+        // Named selectors: zero, one, two, few, many, other
+        map(
+            take_while1(|c: char| c.is_alphanumeric()),
+            |s: &str| PluralSelector::parse(s).unwrap_or(PluralSelector::Other),
+        ),
+    ))(input)
 }
 
 
 fn case_content(input: &str) -> IResult<&str, Message> {
     delimited(
         char('{'),
-        map(many0(alt((number_expression, select_expression, plural_expression, simple_parameter, text_segment_in_case))), Message::new),
+        map(many0(alt((datetime_expression, number_expression, select_expression, plural_expression, simple_parameter, text_segment_in_case))), Message::new),
         char('}'),
     )(input)
 }
@@ -164,6 +176,52 @@ fn number_format_type(input: &str) -> IResult<&str, NumberFormatType> {
     ))(input)
 }
 
+fn datetime_style(input: &str) -> IResult<&str, DateTimeStyle> {
+    alt((
+        map(tag("short"), |_| DateTimeStyle::Short),
+        map(tag("medium"), |_| DateTimeStyle::Medium),
+        map(tag("long"), |_| DateTimeStyle::Long),
+        map(tag("full"), |_| DateTimeStyle::Full),
+    ))(input)
+}
+
+fn datetime_expression(input: &str) -> IResult<&str, MessageElement> {
+    map(
+        delimited(
+            char('{'),
+            tuple((
+                delimited(multispace0, parameter_name, multispace0),
+                preceded(
+                    tuple((char(','), multispace0)),
+                    alt((
+                        map(
+                            preceded(
+                                tuple((tag("date"), multispace0, char(','), multispace0)),
+                                datetime_style,
+                            ),
+                            DateTimeFormatType::Date,
+                        ),
+                        map(
+                            preceded(
+                                tuple((tag("time"), multispace0, char(','), multispace0)),
+                                datetime_style,
+                            ),
+                            DateTimeFormatType::Time,
+                        ),
+                    )),
+                ),
+            )),
+            char('}'),
+        ),
+        |(param, format_type)| {
+            MessageElement::DateTime(DateTimeExpression {
+                parameter: param.to_string(),
+                format_type,
+            })
+        },
+    )(input)
+}
+
 fn text_segment(input: &str) -> IResult<&str, MessageElement> {
     map(
         take_while1(|c: char| c != '{'),
@@ -172,13 +230,15 @@ fn text_segment(input: &str) -> IResult<&str, MessageElement> {
 }
 
 fn message_element(input: &str) -> IResult<&str, MessageElement> {
-    alt((number_expression, select_expression, plural_expression, simple_parameter, text_segment))(input)
+    alt((datetime_expression, number_expression, select_expression, plural_expression, simple_parameter, text_segment))(input)
 }
 
 pub fn parse_message(input: &str) -> IResult<&str, Message> {
-    map(many0(message_element), |elements| {
-        Message::new(elements)
-    })(input)
+    all_consuming(
+        map(many0(message_element), |elements| {
+            Message::new(elements)
+        })
+    )(input)
 }
 
 #[cfg(test)]
@@ -329,6 +389,84 @@ mod tests {
             assert_eq!(number_expr.format_type, NumberFormatType::Currency("EUR".to_string()));
         } else {
             panic!("Expected number expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_plural_exact_zero() {
+        let result = parse_message("{count, plural, =0{no items} other{# items}}");
+        assert!(result.is_ok());
+        let (_, message) = result.unwrap();
+        assert_eq!(message.elements.len(), 1);
+
+        if let MessageElement::Plural(plural_expr) = &message.elements[0] {
+            assert_eq!(plural_expr.parameter, "count");
+            assert_eq!(plural_expr.cases.len(), 2);
+            assert_eq!(plural_expr.cases[0].selector, PluralSelector::Exact(0));
+            assert_eq!(plural_expr.cases[1].selector, PluralSelector::Other);
+        } else {
+            panic!("Expected plural expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_plural_exact_multiple() {
+        let result = parse_message("{n, plural, =0{zero} =1{one} =42{forty-two} other{other}}");
+        assert!(result.is_ok());
+        let (_, message) = result.unwrap();
+        assert_eq!(message.elements.len(), 1);
+
+        if let MessageElement::Plural(plural_expr) = &message.elements[0] {
+            assert_eq!(plural_expr.parameter, "n");
+            assert_eq!(plural_expr.cases.len(), 4);
+            assert_eq!(plural_expr.cases[0].selector, PluralSelector::Exact(0));
+            assert_eq!(plural_expr.cases[1].selector, PluralSelector::Exact(1));
+            assert_eq!(plural_expr.cases[2].selector, PluralSelector::Exact(42));
+            assert_eq!(plural_expr.cases[3].selector, PluralSelector::Other);
+        } else {
+            panic!("Expected plural expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_plural_all_forms() {
+        let result = parse_message("{n, plural, =0{exact} zero{zero} one{one} two{two} few{few} many{many} other{other}}");
+        assert!(result.is_ok());
+        let (_, message) = result.unwrap();
+        assert_eq!(message.elements.len(), 1);
+
+        if let MessageElement::Plural(plural_expr) = &message.elements[0] {
+            assert_eq!(plural_expr.cases.len(), 7);
+            assert_eq!(plural_expr.cases[0].selector, PluralSelector::Exact(0));
+            assert_eq!(plural_expr.cases[1].selector, PluralSelector::Zero);
+            assert_eq!(plural_expr.cases[2].selector, PluralSelector::One);
+            assert_eq!(plural_expr.cases[3].selector, PluralSelector::Two);
+            assert_eq!(plural_expr.cases[4].selector, PluralSelector::Few);
+            assert_eq!(plural_expr.cases[5].selector, PluralSelector::Many);
+            assert_eq!(plural_expr.cases[6].selector, PluralSelector::Other);
+        } else {
+            panic!("Expected plural expression");
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_select_with_plural() {
+        let result = parse_message("{gender, select, male{{count, plural, one{one} other{many}}} other{other}}");
+        assert!(result.is_ok());
+        let (_, message) = result.unwrap();
+        assert_eq!(message.elements.len(), 1);
+
+        if let MessageElement::Select(select_expr) = &message.elements[0] {
+            assert_eq!(select_expr.parameter, "gender");
+            assert_eq!(select_expr.cases.len(), 2);
+
+            // Check that the male case contains a plural expression
+            let male_case = &select_expr.cases[0];
+            assert_eq!(male_case.selector, "male");
+            assert_eq!(male_case.message.elements.len(), 1);
+            assert!(matches!(male_case.message.elements[0], MessageElement::Plural(_)));
+        } else {
+            panic!("Expected select expression");
         }
     }
 }

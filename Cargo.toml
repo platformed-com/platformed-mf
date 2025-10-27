@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 nom = "7.1"
-icu = { version = "1.4", features = ["experimental"] }
-fixed_decimal = "0.5"
+icu = { version = "2", features = ["experimental"] }
 tinystr = "0.7"
-writeable = "0.5"
+writeable = "0.6"

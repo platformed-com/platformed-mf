@@ -5,6 +5,7 @@ pub enum MessageElement {
     Plural(PluralExpression),
     Select(SelectExpression),
     Number(NumberExpression),
+    DateTime(DateTimeExpression),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,10 +40,30 @@ pub struct NumberExpression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NumberFormatType {
-    Number,        // Basic number formatting
-    Integer,       // Integer formatting (no decimals)
-    Percent,       // Percentage formatting
+    Number,           // Basic number formatting
+    Integer,          // Integer formatting (no decimals)
+    Percent,          // Percentage formatting
     Currency(String), // Currency formatting with optional currency code
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DateTimeExpression {
+    pub parameter: String,
+    pub format_type: DateTimeFormatType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DateTimeFormatType {
+    Date(DateTimeStyle), // Date formatting
+    Time(DateTimeStyle), // Time formatting
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DateTimeStyle {
+    Short,
+    Medium,
+    Long,
+    Full,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,7 +111,7 @@ impl Message {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ParameterValue<'a> {
     String(&'a str),
-    Number(i64),
+    Integer(i64),
 }
 
 // Trait for types that can be used as parameter values without taking ownership
@@ -106,13 +127,13 @@ impl AsParameterValue for &str {
 
 impl AsParameterValue for i64 {
     fn as_parameter_value<'a>(&'a self) -> ParameterValue<'a> {
-        ParameterValue::Number(*self)
+        ParameterValue::Integer(*self)
     }
 }
 
 impl AsParameterValue for i32 {
     fn as_parameter_value<'a>(&'a self) -> ParameterValue<'a> {
-        ParameterValue::Number(*self as i64)
+        ParameterValue::Integer(*self as i64)
     }
 }
 
@@ -171,7 +192,7 @@ mod tests {
     fn test_duplicate_keys_panic() {
         Parameters::from_slice(&[
             ("name", ParameterValue::String("Alice")),
-            ("age", ParameterValue::Number(25)),
+            ("age", ParameterValue::Integer(25)),
             ("name", ParameterValue::String("Bob")),
         ]);
     }
@@ -180,12 +201,12 @@ mod tests {
     fn test_unique_keys_ok() {
         let params = Parameters::from_slice(&[
             ("name", ParameterValue::String("Alice")),
-            ("age", ParameterValue::Number(25)),
+            ("age", ParameterValue::Integer(25)),
             ("city", ParameterValue::String("NYC")),
         ]);
 
         assert_eq!(params.get("name"), Some(&ParameterValue::String("Alice")));
-        assert_eq!(params.get("age"), Some(&ParameterValue::Number(25)));
+        assert_eq!(params.get("age"), Some(&ParameterValue::Integer(25)));
         assert_eq!(params.get("city"), Some(&ParameterValue::String("NYC")));
         assert_eq!(params.get("unknown"), None);
     }
@@ -198,8 +219,11 @@ mod tests {
         // Test by using params! directly in assertions
         let test_fn = |params: Parameters| {
             assert_eq!(params.get("name"), Some(&ParameterValue::String("Alice")));
-            assert_eq!(params.get("age"), Some(&ParameterValue::Number(25)));
-            assert_eq!(params.get("city"), Some(&ParameterValue::String("New York")));
+            assert_eq!(params.get("age"), Some(&ParameterValue::Integer(25)));
+            assert_eq!(
+                params.get("city"),
+                Some(&ParameterValue::String("New York"))
+            );
         };
 
         test_fn(params!(

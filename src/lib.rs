@@ -504,6 +504,27 @@ mod tests {
     }
 
     #[test]
+    fn test_date_short_en_gb_vs_us() {
+        // Unix timestamp for Jan 2, 2024
+        let timestamp = 1704167200i64;
+        let result_gb = format(
+            &locale!("en-GB"),
+            "Date: {date, date, short}",
+            params!("date" => timestamp),
+        )
+        .unwrap();
+        let result_us = format(
+            &locale!("en-US"),
+            "Date: {date, date, short}",
+            params!("date" => timestamp),
+        )
+        .unwrap();
+
+        assert_eq!(result_gb, "Date: 02/01/2024");
+        assert_eq!(result_us, "Date: 1/2/24");
+    }
+
+    #[test]
     fn test_date_medium() {
         let timestamp = 1704067200i64; // 2024-01-01 00:00:00 UTC
         let result = format(
